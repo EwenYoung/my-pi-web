@@ -9,14 +9,14 @@ import { TabBar, type Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { BranchNavigator } from "./BranchNavigator";
-import { useTheme } from "@/hooks/useTheme";
+import { useTheme, THEMES } from "@/hooks/useTheme";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { isDark, toggleTheme } = useTheme();
+  const { theme, setTheme } = useTheme();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
@@ -24,8 +24,17 @@ export function AppShell() {
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
+  const [themeDropdownOpen, setThemeDropdownOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
+  const [piVersion, setPiVersion] = useState("");
+
+  useEffect(() => {
+    fetch("/api/pi-version")
+      .then((r) => r.json())
+      .then((d: { version: string }) => setPiVersion(`pi v${d.version}`))
+      .catch(() => setPiVersion("pi"));
+  }, []);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
@@ -58,6 +67,11 @@ export function AppShell() {
     setSessionStats(stats);
   }, []);
 
+  // Called by ChatWindow when session name changes (e.g. via /name command)
+  const handleSessionNameChanged = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   // Context usage — populated by ChatWindow, displayed in top bar
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
@@ -84,10 +98,53 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel]);
 
+  // Close theme dropdown on outside click
+  useEffect(() => {
+    if (!themeDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest("[data-theme-dropdown]")) {
+        setThemeDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler, { capture: true });
+    return () => document.removeEventListener("mousedown", handler, { capture: true });
+  }, [themeDropdownOpen]);
+
   // Right panel — file tabs only
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+
+  // Resizable right panel
+  const [rightPanelWidth, setRightPanelWidth] = useState(42);
+  const draggingRef = useRef<"right" | null>(null);
+  const dragStartRef = useRef<{ x: number; startValue: number }>({ x: 0, startValue: 0 });
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    draggingRef.current = "right";
+    dragStartRef.current = { x: e.clientX, startValue: rightPanelWidth };
+    const onMove = (ev: MouseEvent) => {
+      if (!draggingRef.current) return;
+      const dx = ev.clientX - dragStartRef.current.x;
+      // 向右拖拽 = 减小右面板宽度（分割线在右面板左边缘）
+      const maxPct = Math.min(70, (window.innerWidth - 560) / window.innerWidth * 100);
+      const newW = Math.max(15, Math.min(maxPct, dragStartRef.current.startValue - (dx / window.innerWidth) * 100));
+      setRightPanelWidth(newW);
+    };
+    const onUp = () => {
+      draggingRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [rightPanelWidth]);
 
   const handleAtMention = useCallback((relativePath: string) => {
     chatInputRef.current?.insertText("`" + relativePath + "`");
@@ -295,6 +352,9 @@ export function AppShell() {
             {label}
           </button>
         ))}
+        <div style={{ textAlign: "center", fontSize: 10, color: "var(--text-dim)", paddingTop: 4 }}>
+          {piVersion || "pi"}
+        </div>
       </div>
     </>
   );
@@ -358,37 +418,54 @@ export function AppShell() {
               </svg>
             )}
           </button>
-          <button
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-            }}
-            title={isDark ? "Switch to light mode" : "Switch to dark mode"}
-            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-            aria-pressed={isDark}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 36, height: 36, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {isDark ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="5" />
-                <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
+          <div data-theme-dropdown style={{ position: "relative" }}>
+            <button
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setThemeDropdownOpen((v) => !v);
+              }}
+              title="切换主题"
+              aria-label="切换主题"
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                padding: "0 12px", height: 36,
+                background: "none", border: "none", borderRight: "1px solid var(--border)",
+                color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
+            >
+              {THEMES.find((t) => t.id === theme)?.label ?? "浅色"}
+            </button>
+            {themeDropdownOpen && (
+              <div style={{
+                position: "absolute", top: "100%", left: 0, marginTop: 2, zIndex: 1000,
+                background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8,
+                boxShadow: "0 -4px 16px rgba(0,0,0,0.10)", overflow: "hidden", minWidth: 120,
+              }}>
+                {THEMES.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => {
+                      setThemeDropdownOpen(false);
+                      setTheme(t.id);
+                    }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      width: "100%", padding: "8px 12px",
+                      background: t.id === theme ? "var(--bg-selected)" : "none",
+                      border: "none",
+                      color: t.id === theme ? "var(--text)" : "var(--text-muted)",
+                      cursor: "pointer", fontSize: 12, textAlign: "left",
+                      fontWeight: t.id === theme ? 600 : 400,
+                    }}
+                  >
+                    <span>{t.label}</span>
+                  </button>
+                ))}
+              </div>
             )}
-          </button>
+          </div>
           {showChat && (
             <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
               <button
@@ -484,8 +561,8 @@ export function AppShell() {
           {showChat && (sessionStats || contextUsage) && (() => {
             const t = sessionStats?.tokens;
             const c = sessionStats?.cost ?? 0;
-            const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
-            const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
+            const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+            const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(3)}` : `<$0.01`) : null;
 
             let ctxColor = "var(--text-muted)";
             let ctxStr: string | null = null;
@@ -498,71 +575,53 @@ export function AppShell() {
 
             const tooltipParts: string[] = [];
             if (t) {
-              tooltipParts.push(`in: ${t.input.toLocaleString()}`);
-              tooltipParts.push(`out: ${t.output.toLocaleString()}`);
-              tooltipParts.push(`cache read: ${t.cacheRead.toLocaleString()}`);
-              tooltipParts.push(`cache write: ${t.cacheWrite.toLocaleString()}`);
-              if (c > 0) tooltipParts.push(`cost: $${c.toFixed(4)}`);
+              tooltipParts.push(`输入: ${t.input.toLocaleString()}`);
+              tooltipParts.push(`输出: ${t.output.toLocaleString()}`);
+              if (t.cacheRead > 0) {
+                const hitRate = t.input + t.cacheRead > 0 ? (t.cacheRead / (t.input + t.cacheRead) * 100) : 0;
+                tooltipParts.push(`缓存读取: ${t.cacheRead.toLocaleString()} (命中率 ${hitRate.toFixed(1)}%)`);
+              }
+              if (c > 0) tooltipParts.push(`费用: $${c.toFixed(4)}`);
             }
             if (contextUsage?.contextWindow) {
               const pct = contextUsage.percent;
-              tooltipParts.push(`context: ${pct !== null ? pct.toFixed(1) + "%" : "unknown"} of ${contextUsage.contextWindow.toLocaleString()} tokens`);
+              const usedStr = contextUsage.tokens !== null ? fmt(contextUsage.tokens) : (pct !== null ? pct.toFixed(1) + "%" : "?");
+              tooltipParts.push(`上下文: ${usedStr} / ${fmt(contextUsage.contextWindow)}`);
             }
             const tooltip = tooltipParts.join("  |  ");
 
             return (
-              <div
-                title={tooltip}
-                style={{
-                  marginLeft: "auto",
-                  display: "flex", alignItems: "center", gap: 10,
-                  paddingLeft: 12,
-                  paddingRight: rightPanelOpen ? 12 : 48,
-                  height: "100%",
-                  fontSize: 11, color: "var(--text-muted)",
-                  whiteSpace: "nowrap", cursor: "default",
-                  fontVariantNumeric: "tabular-nums",
-                }}
-              >
-                {t && t.input > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
-                    </svg>
-                    {fmt(t.input)}
-                  </span>
-                )}
-                {t && t.output > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                    {fmt(t.output)}
-                  </span>
-                )}
-                {t && t.cacheRead > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
-                    </svg>
-                    {fmt(t.cacheRead)}
-                  </span>
-                )}
-                {costStr && (
-                  <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
-                    {costStr}
-                  </span>
-                )}
-                {ctxStr && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: ctxColor }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1 9 L1 5 Q1 1 5 1 Q9 1 9 5 L9 9" /><line x1="1" y1="9" x2="9" y2="9" />
-                    </svg>
-                    {ctxStr}
-                  </span>
-                )}
-              </div>
-            );
+  <div
+    title={tooltip}
+    style={{
+      marginLeft: "auto",
+      display: "flex", alignItems: "center", gap: 10,
+      paddingLeft: 12,
+      paddingRight: rightPanelOpen ? 12 : 48,
+      height: "100%",
+      fontSize: 11, color: "var(--text-muted)",
+      whiteSpace: "nowrap", cursor: "default",
+      fontVariantNumeric: "tabular-nums",
+    }}
+  >
+    {t && t.input > 0 && (
+      <span>↑{fmt(t.input)}</span>
+    )}
+    {t && t.output > 0 && (
+      <span>↓{fmt(t.output)}</span>
+    )}
+    {t && t.cacheRead > 0 && (() => {
+      const hitRate = t.input + t.cacheRead > 0 ? (t.cacheRead / (t.input + t.cacheRead) * 100) : 0;
+      return <span>R{fmt(t.cacheRead)} <span style={{ color: "var(--text-muted)" }}>CH{hitRate.toFixed(1)}%</span></span>;
+    })()}
+    {costStr && (
+      <span>{costStr}</span>
+    )}
+    {ctxStr && (
+      <span style={{ color: ctxColor }}>{ctxStr}</span>
+    )}
+  </div>
+);
           })()}
           {/* Top panel dropdown — shared, only one active at a time */}
           {activeTopPanel && topPanelPos && (
@@ -623,6 +682,7 @@ export function AppShell() {
               onSystemPromptChange={handleSystemPromptChange}
               onSessionStatsChange={handleSessionStatsChange}
               onContextUsageChange={handleContextUsageChange}
+              onSessionNameChanged={handleSessionNameChanged}
             />
           ) : showPlaceholder ? (
             activeCwd ? (
@@ -648,37 +708,59 @@ export function AppShell() {
       </div>
 
       {/* Right panel: file viewer — always mounted, width animated via CSS */}
-      <div
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          borderLeft: "1px solid var(--border)",
-          background: "var(--bg)",
-        }}
-      >
-        {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <TabBar
-              tabs={fileTabs}
-              activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
-              onCloseTab={handleCloseFileTab}
-            />
+      <div style={{ position: "relative", flexShrink: 0, width: rightPanelOpen ? `${rightPanelWidth}%` : 0, overflowX: "visible", overflowY: "hidden" }}>
+        {/* Drag handle */}
+        {rightPanelOpen && (
+          <div
+            onMouseDown={handleDragStart}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: -3,
+              width: 6,
+              height: "100%",
+              cursor: "col-resize",
+              zIndex: 10,
+            }}
+          />
+        )}
+        <div
+          className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
+          style={{
+            width: rightPanelOpen ? "100%" : 0,
+            minWidth: rightPanelOpen ? 300 : 0,
+            height: "100%",
+            display: "flex",
+            flexDirection: "column",
+            borderLeft: "1px solid var(--border)",
+            background: "var(--bg)",
+            transition: draggingRef.current ? "none" : "width 0.2s ease, min-width 0.2s ease",
+            overflow: "hidden",
+          }}
+        >
+          {/* Right panel tab bar */}
+          <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
+            <div style={{ flex: 1, overflow: "hidden" }}>
+              <TabBar
+                tabs={fileTabs}
+                activeTabId={activeFileTabId ?? ""}
+                onSelectTab={setActiveFileTabId}
+                onCloseTab={handleCloseFileTab}
+              />
+            </div>
+
           </div>
 
-        </div>
-
-        {/* File content */}
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          {activeFileTab?.filePath ? (
-            <FileViewer filePath={activeFileTab.filePath} cwd={activeCwd ?? undefined} />
-          ) : (
-            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
-              No file open
-            </div>
-          )}
+          {/* File content */}
+          <div className="file-content-wrapper" style={{ minHeight: 0 }}>
+            {activeFileTab?.filePath ? (
+              <FileViewer filePath={activeFileTab.filePath} cwd={activeCwd ?? undefined} />
+            ) : (
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
+                No file open
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

@@ -50,5 +50,6 @@ export interface AgentSessionLike {
   getActiveToolNames(): string[];
   setActiveToolsByName(names: string[]): void;
   abortCompaction(): void;
+  reload(): Promise<void>;
   getContextUsage(): ContextUsage | undefined;
 }

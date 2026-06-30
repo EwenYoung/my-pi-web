@@ -7,8 +7,11 @@ import { join } from "path";
 // Creates ~/pi-cwd-<YYYYMMDD> if it doesn't exist and returns the path.
 export async function POST() {
   try {
-    const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-    const dir = join(homedir(), `pi-cwd-${date}`);
+    const now = new Date();
+    const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+    const workspace = join(homedir(), "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const dir = join(workspace, `pi-cwd-${date}`);
     mkdirSync(dir, { recursive: true });
     return NextResponse.json({ cwd: dir });
   } catch (error) {

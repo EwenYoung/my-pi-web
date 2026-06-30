@@ -137,20 +137,25 @@ function UserMessageView({ message, entryId, onFork, forking, onNavigate, prevAs
               {imageBlocks.map((img, i) => {
                 // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
                 // pi-ai on-disk format uses flat {data, mimeType} — handle both
-                const flat = img as unknown as { data?: string; mimeType?: string };
-                const src = img.source
-                  ? img.source.type === "base64"
+                const flat = img as unknown as { data?: string; mimeType?: string; _imageMeta?: { sessionId: string; msgIdx: number; blockIdx: number; size: number } };
+                let src: string;
+                if (flat._imageMeta) {
+                  // Lazy-loaded image from API
+                  src = `/api/sessions/${flat._imageMeta.sessionId}/image?msg=${flat._imageMeta.msgIdx}&block=${flat._imageMeta.blockIdx}`;
+                } else if (img.source) {
+                  src = img.source.type === "base64"
                     ? `data:${img.source.media_type};base64,${img.source.data}`
-                    : img.source.url ?? ""
-                  : flat.data
-                    ? `data:${flat.mimeType};base64,${flat.data}`
-                    : "";
+                    : img.source.url ?? "";
+                } else {
+                  src = flat.data ? `data:${flat.mimeType};base64,${flat.data}` : "";
+                }
                 return (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     key={i}
                     src={src}
                     alt=""
+                    loading="lazy"
                     style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid rgba(59,130,246,0.15)" }}
                   />
                 );
@@ -418,8 +423,12 @@ function AssistantMessageView({
             else if (b.type === "toolCall") chars += JSON.stringify((b as ToolCallContent).input ?? {}).length;
           }
           const est = Math.round(chars / 4);
+          const isThinking = isStreaming && est === 0 && blocks.length === 0;
           return (
             <>
+              {isThinking && (
+                <span style={{ color: "var(--text-dim)", fontSize: 11 }} className="animate-[pulse_1.5s_infinite]">working...</span>
+              )}
 
               {est > 0 && (
                 <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title="预估 token 数（流式接收中）">
@@ -719,6 +728,6 @@ function formatUsage(usage: {
   if (usage.input) parts.push(`${usage.input.toLocaleString()} in`);
   if (usage.output) parts.push(`${usage.output.toLocaleString()} out`);
   if (usage.cacheRead) parts.push(`${usage.cacheRead.toLocaleString()} cache`);
-  if (usage.cost?.total) parts.push(`$${usage.cost.total.toFixed(4)}`);
+  if (usage.cost?.total) parts.push(`¥${(usage.cost.total * 6.7724).toFixed(4)}`);
   return parts.join(" · ");
 }

@@ -2,6 +2,11 @@ import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-ag
 import { cacheSessionPath } from "./session-reader";
 import type { AgentSessionLike, ToolInfo } from "./pi-types";
 
+// Keep last context usage per session id, accessible even after RPC session ends
+globalThis.__piLastContextUsage = globalThis.__piLastContextUsage as
+  Map<string, { percent: number | null; contextWindow: number; tokens: number | null }>
+  ?? new Map();
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -24,6 +29,7 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
+  private lastContextUsage: { percent: number | null; contextWindow: number; tokens: number | null } | null = null;
 
   constructor(public readonly inner: AgentSessionLike) {}
 
@@ -42,6 +48,16 @@ export class AgentSessionWrapper {
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
+      // Capture context usage on agent_end so it's available after session ends
+      if (event.type === "agent_end") {
+        try {
+          const cu = this.inner.getContextUsage?.();
+          if (cu) {
+            this.lastContextUsage = { percent: cu.percent, contextWindow: cu.contextWindow, tokens: cu.tokens };
+            (globalThis as any).__piLastContextUsage.set(this.sessionId, this.lastContextUsage);
+          }
+        } catch { /* ignore */ }
+      }
       for (const l of this.listeners) l(event);
     });
     this.resetIdleTimer();
@@ -70,9 +86,17 @@ export class AgentSessionWrapper {
 
     switch (type) {
       case "prompt": {
-        // Fire and forget — events come via subscribe
+        // 等待 agent_start 事件确保消息已写入文件
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+        const startPromise = new Promise<void>((resolve) => {
+          const unsub = this.inner.subscribe((ev: any) => {
+            if (ev.type === "agent_start") { unsub(); resolve(); }
+          });
+          // 超时兜底，避免永远等待
+          setTimeout(() => { unsub(); resolve(); }, 5000);
+        });
         this.inner.prompt(command.message as string, promptImages?.length ? { images: promptImages } : undefined).catch(() => {});
+        await startPromise;
         return null;
       }
 
@@ -82,7 +106,7 @@ export class AgentSessionWrapper {
 
       case "get_state": {
         const model = this.inner.model;
-        const contextUsage = this.inner.getContextUsage();
+        const contextUsage = this.inner.getContextUsage() ?? this.lastContextUsage ?? (globalThis as any).__piLastContextUsage.get(this.sessionId) ?? null;
         return {
           sessionId: this.inner.sessionId,
           sessionFile: this.inner.sessionFile ?? "",
@@ -216,6 +240,10 @@ export class AgentSessionWrapper {
         this.inner.abortCompaction();
         return null;
       }
+
+      case "reload":
+        await this.inner.reload();
+        return { ok: true };
 
       case "set_auto_retry": {
         this.inner.setAutoRetryEnabled(command.enabled as boolean);

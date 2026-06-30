@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
+import Script from "next/script";
 import "katex/dist/katex.min.css";
 import "./globals.css";
 
@@ -21,14 +22,14 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={notoSansMono.variable} suppressHydrationWarning>
-      <head>
-        <script
+      <body style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+        <Script
+          id="pi-theme"
+          strategy="beforeInteractive"
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem("pi-theme");if(t==="dark")document.documentElement.classList.add("dark")}catch(e){}})();`,
+            __html: `(function(){try{var t=localStorage.getItem("pi-theme");if(t&&t!=="light")document.documentElement.classList.add(t)}catch(e){}})();`,
           }}
         />
-      </head>
-      <body style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}
       </body>
     </html>

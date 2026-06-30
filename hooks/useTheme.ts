@@ -2,7 +2,18 @@
 
 import { useCallback, useSyncExternalStore } from "react";
 
-type Theme = "light" | "dark";
+export type Theme = "light" | "dark" | "deep-ink" | "twilight" | "claude" | "catppuccin";
+
+export const THEMES: { id: Theme; label: string }[] = [
+  { id: "light", label: "Light" },
+  { id: "dark", label: "Dark" },
+  { id: "deep-ink", label: "DeepInk" },
+  { id: "twilight", label: "Twilight" },
+  { id: "claude", label: "Claude" },
+  { id: "catppuccin", label: "Catppuccin" },
+];
+
+const THEME_CLASSES: Theme[] = ["dark", "deep-ink", "twilight", "claude", "catppuccin"];
 
 const listeners = new Set<() => void>();
 
@@ -13,13 +24,38 @@ function subscribe(cb: () => void): () => void {
   };
 }
 
-function getSnapshot(): Theme {
+function getThemeClass(t: Theme): string {
+  return t === "light" ? "" : t;
+}
+
+export function getTheme(): Theme {
   if (typeof document === "undefined") return "light";
-  return document.documentElement.classList.contains("dark") ? "dark" : "light";
+  for (const cls of THEME_CLASSES) {
+    if (document.documentElement.classList.contains(cls)) return cls;
+  }
+  return "light";
+}
+
+function getSnapshot(): Theme {
+  return getTheme();
 }
 
 function getServerSnapshot(): Theme {
   return "light";
+}
+
+function applyTheme(theme: Theme) {
+  for (const cls of THEME_CLASSES) {
+    document.documentElement.classList.remove(cls);
+  }
+  const cls = getThemeClass(theme);
+  if (cls) document.documentElement.classList.add(cls);
+  try {
+    localStorage.setItem("pi-theme", theme);
+  } catch {
+    // ignore storage errors
+  }
+  listeners.forEach((cb) => cb());
 }
 
 type ToggleOrigin = { x: number; y: number };
@@ -27,22 +63,8 @@ type ToggleOrigin = { x: number; y: number };
 export function useTheme() {
   const theme = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
-  const toggleTheme = useCallback((origin?: ToggleOrigin) => {
-    const next: Theme = getSnapshot() === "dark" ? "light" : "dark";
-
-    const apply = () => {
-      if (next === "dark") {
-        document.documentElement.classList.add("dark");
-      } else {
-        document.documentElement.classList.remove("dark");
-      }
-      try {
-        localStorage.setItem("pi-theme", next);
-      } catch {
-        // ignore storage errors (private mode, quota, etc.)
-      }
-      listeners.forEach((cb) => cb());
-    };
+  const setTheme = useCallback((theme: Theme, origin?: ToggleOrigin) => {
+    const apply = () => applyTheme(theme);
 
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const supportsVT = typeof document.startViewTransition === "function";
@@ -81,5 +103,11 @@ export function useTheme() {
       });
   }, []);
 
-  return { theme, toggleTheme, isDark: theme === "dark" };
+  const toggleTheme = useCallback((origin?: ToggleOrigin) => {
+    const current = getTheme();
+    const next: Theme = current === "dark" ? "light" : "dark";
+    setTheme(next, origin);
+  }, [setTheme]);
+
+  return { theme, setTheme, toggleTheme, isDark: theme === "dark" };
 }

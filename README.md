@@ -17,7 +17,7 @@ npm install -g @agegr/pi-web
 pi-web
 ```
 
-启动后打开 [http://localhost:30141](http://localhost:30141)。
+启动后打开 [http://localhost:9527](http://localhost:9527)。
 
 **可选参数：**
 
@@ -51,7 +51,7 @@ PORT=8080 pi-web                 # 也支持环境变量
 
 ```bash
 npm install
-npm run dev   # 端口 30141
+npm run dev   # 端口 9527
 ```
 
 ## 项目结构

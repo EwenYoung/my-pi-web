@@ -36,7 +36,7 @@ const { values: cliArgs } = parseArgs({
   strict: false,
 });
 
-const port     = cliArgs.port     ?? process.env.PORT     ?? "30141";
+const port     = cliArgs.port     ?? process.env.PORT     ?? "9527";
 const hostname = cliArgs.hostname ?? process.env.HOSTNAME ?? null;
 
 if (!fs.existsSync(nextDir)) {
@@ -65,8 +65,13 @@ child.stdout.on("data", (chunk) => {
     browserOpened = true;
     const isWindows = process.platform === "win32";
     const isMac = process.platform === "darwin";
-    const openCmd = isWindows ? "start" : isMac ? "open" : "xdg-open";
-    spawn(openCmd, [url], { shell: isWindows, stdio: "ignore", detached: true }).unref();
+    // Only open browser on desktop environments
+    if (isWindows || isMac) {
+      const openCmd = isWindows ? "start" : "open";
+      const opener = spawn(openCmd, [url], { shell: isWindows, stdio: "ignore", detached: true });
+      opener.on("error", () => {});
+      opener.unref();
+    }
   }
 });
 

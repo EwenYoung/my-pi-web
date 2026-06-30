@@ -1,6 +1,6 @@
-import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry, SessionInfo, SessionContext, SessionTreeNode, AssistantMessage } from "./types";
-import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
+import { SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry, SessionInfo, SessionContext, SessionTreeNode } from "./types";
+import type { SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 
 export { getAgentDir };
@@ -9,13 +9,24 @@ export function getSessionsDir(): string {
   return `${getAgentDir()}/sessions`;
 }
 
-export async function listAllSessions(): Promise<SessionInfo[]> {
-  const piSessions: PiSessionInfo[] = await SessionManager.listAll();
+// Cache for listAllSessions — avoids scanning all files on every session load
+let __sessionListCache: { sessions: SessionInfo[]; timestamp: number } | null = null;
+const SESSION_LIST_CACHE_MS = 60_000;
+
+export async function listAllSessions(cwd?: string): Promise<SessionInfo[]> {
+  // Return cached result if fresh enough (only for full list, not cwd-scoped)
+  if (!cwd && __sessionListCache && Date.now() - __sessionListCache.timestamp < SESSION_LIST_CACHE_MS) {
+    return __sessionListCache.sessions;
+  }
+
+  const piSessions: PiSessionInfo[] = cwd
+    ? await SessionManager.list(cwd)
+    : await SessionManager.listAll();
   const pathToId = new Map<string, string>();
   for (const s of piSessions) pathToId.set(s.path, s.id);
 
   const cache = getPathCache();
-  return piSessions.map((s) => {
+  const sessions = piSessions.map((s) => {
     // Populate path cache so resolveSessionPath works without a full scan
     cache.set(s.id, s.path);
     return {
@@ -30,6 +41,8 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
       parentSessionId: s.parentSessionPath ? pathToId.get(s.parentSessionPath) : undefined,
     };
   });
+  __sessionListCache = { sessions, timestamp: Date.now() };
+  return sessions;
 }
 
 // ============================================================================
@@ -60,6 +73,7 @@ export function cacheSessionPath(sessionId: string, filePath: string): void {
 
 export function invalidateSessionPathCache(sessionId: string): void {
   getPathCache().delete(sessionId);
+  __sessionListCache = null;
 }
 
 export function getSessionEntries(filePath: string): SessionEntry[] {
@@ -107,19 +121,15 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
 
-  const piEntries = entries as unknown as PiSessionEntry[];
-  const piCtx = piBuildSessionContext(piEntries, leafId, byId as unknown as Map<string, PiSessionEntry>);
-
-  // Build entryIds: parallel array to messages[], mapping each message back to its entry id.
-  // Needed for fork and navigate_tree calls from the UI.
+  // Find target leaf
   let targetLeaf: SessionEntry | undefined;
   if (leafId === null) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model };
+    return { messages: [], entryIds: [], thinkingLevel: "off", model: null };
   }
   if (leafId) targetLeaf = byId.get(leafId);
   if (!targetLeaf) targetLeaf = entries[entries.length - 1];
   if (!targetLeaf) {
-    return { messages: [], entryIds: [], thinkingLevel: piCtx.thinkingLevel, model: piCtx.model };
+    return { messages: [], entryIds: [], thinkingLevel: "off", model: null };
   }
 
   // Walk path from target leaf to root
@@ -130,46 +140,58 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
     cur = cur.parentId ? byId.get(cur.parentId) : undefined;
   }
 
-  // Find the last compaction on path (mirrors pi's buildSessionContext logic)
-  let compactionId: string | undefined;
-  let firstKeptEntryId: string | undefined;
+  // Extract thinking level and model from path
+  let thinkingLevel = "off";
+  let model: { provider: string; modelId: string } | null = null;
   for (const e of path) {
-    if (e.type === "compaction") {
-      compactionId = e.id;
-      firstKeptEntryId = (e as { firstKeptEntryId: string }).firstKeptEntryId;
+    if (e.type === "thinking_level_change") {
+      thinkingLevel = (e as any).thinkingLevel ?? thinkingLevel;
+    } else if (e.type === "model_change") {
+      model = { provider: (e as any).provider, modelId: (e as any).modelId };
     }
   }
 
+  // Build messages from ALL path entries (skip compaction stripping).
+  // compactions produce a synthetic summary message, normal messages are kept as-is.
   const entryIds: string[] = [];
-  if (compactionId) {
-    // The first message in piCtx.messages is the synthetic compaction summary — map to compaction entry id
-    entryIds.push(compactionId);
-    const compactionIdx = path.findIndex((e) => e.id === compactionId);
-    const firstKeptIdx = firstKeptEntryId
-      ? path.findIndex((e, i) => i < compactionIdx && e.id === firstKeptEntryId)
-      : -1;
-    const startIdx = firstKeptIdx >= 0 ? firstKeptIdx : compactionIdx;
-    for (let i = startIdx; i < compactionIdx; i++) {
-      if (path[i].type === "message") entryIds.push(path[i].id);
-    }
-    for (let i = compactionIdx + 1; i < path.length; i++) {
-      if (path[i].type === "message") entryIds.push(path[i].id);
-    }
-  } else {
-    for (const e of path) {
-      if (e.type === "message") entryIds.push(e.id);
+  const rawMessages: any[] = [];
+
+  for (const e of path) {
+    if (e.type === "message") {
+      entryIds.push(e.id);
+      rawMessages.push((e as any).message);
+    } else if (e.type === "compaction") {
+      entryIds.push(e.id);
+      rawMessages.push({
+        role: "compactionSummary" as const,
+        summary: (e as any).summary ?? "",
+        tokensBefore: (e as any).tokensBefore,
+        timestamp: (e as any).timestamp,
+      });
+    } else if (e.type === "custom_message") {
+      entryIds.push(e.id);
+      rawMessages.push({
+        role: "user" as const,
+        content: `*${(e as any).display || (e as any).customType || "Custom message"}*\n\n${(e as any).content ?? ""}`,
+        timestamp: (e as any).timestamp,
+      });
+    } else if (e.type === "branch_summary" && (e as any).summary) {
+      entryIds.push(e.id);
+      rawMessages.push({
+        role: "user" as const,
+        content: `*Branch summary: ${(e as any).summary}*`,
+        timestamp: (e as any).timestamp,
+      });
     }
   }
 
-  // pi injects compaction summary as {role:"compactionSummary", summary, tokensBefore}.
-  // Convert to {role:"user"} so MessageView can render it the same as before.
-  const messages = (piCtx.messages as AssistantMessage[]).map((msg) => {
-    const raw = msg as unknown as Record<string, unknown>;
-    if (raw.role === "compactionSummary") {
+  // Convert compactionSummary to user message format
+  const messages = rawMessages.map((msg: any) => {
+    if (msg.role === "compactionSummary") {
       return {
         role: "user" as const,
-        content: `*The conversation history before this point was compacted into the following summary:*\n\n${raw.summary ?? ""}`,
-        timestamp: raw.timestamp as number | undefined,
+        content: `*The conversation history before this point was compacted into the following summary:*\n\n${msg.summary ?? ""}`,
+        timestamp: msg.timestamp as number | undefined,
       };
     }
     return normalizeToolCalls(msg);
@@ -178,8 +200,8 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   return {
     messages,
     entryIds,
-    thinkingLevel: piCtx.thinkingLevel,
-    model: piCtx.model,
+    thinkingLevel,
+    model,
   };
 }
 

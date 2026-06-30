@@ -52,6 +52,80 @@ html.dark {
   --bg-subtle: rgba(255,255,255,0.04);
 }
 
+
+
+/* Deep Ink Blue / 深墨蓝 — 浓墨深蓝，沉稳内敛 */
+html.deep-ink {
+  --bg: #121820;
+  --bg-panel: #1a222e;
+  --bg-hover: #222c3c;
+  --bg-selected: #2a364a;
+  --border: #334158;
+  --text: #d8dce6;
+  --text-muted: #7a889e;
+  --text-dim: #5a687e;
+  --accent: #5b8def;
+  --accent-hover: #89b0f7;
+  --user-bg: #1e2838;
+  --assistant-bg: #121820;
+  --tool-bg: #1a2434;
+  --bg-subtle: rgba(91,141,239,0.06);
+}
+
+/* Claude / 暖米色 — Claude 同款，温和米棕暖调 */
+html.claude {
+  --bg: #f7f5f2;
+  --bg-panel: #efede9;
+  --bg-hover: #e5e1da;
+  --bg-selected: #d9d4cb;
+  --border: #cfc8bd;
+  --text: #2c2824;
+  --text-muted: #7a7062;
+  --text-dim: #9a8e80;
+  --accent: #c9653a;
+  --accent-hover: #b0562e;
+  --user-bg: #eae5dc;
+  --assistant-bg: #f7f5f2;
+  --tool-bg: #f0ede8;
+  --bg-subtle: rgba(201,101,58,0.05);
+}
+
+/* Catppuccin Mocha / 柔雾 — 甜系马卡龙粉彩暗色 */
+html.catppuccin {
+  --bg: #1e1e2e;
+  --bg-panel: #181825;
+  --bg-hover: #313244;
+  --bg-selected: #45475a;
+  --border: #585b70;
+  --text: #cdd6f4;
+  --text-muted: #a6adc8;
+  --text-dim: #6c7086;
+  --accent: #cba6f7;
+  --accent-hover: #b4befe;
+  --user-bg: #262637;
+  --assistant-bg: #1e1e2e;
+  --tool-bg: #1e1e2e;
+  --bg-subtle: rgba(203,166,247,0.08);
+}
+
+/* Twilight Gray / 暮云灰 — 暮色灰调，柔和低饱和 */
+html.twilight {
+  --bg: #eaebee;
+  --bg-panel: #e0e2e6;
+  --bg-hover: #d4d6dc;
+  --bg-selected: #c8cad2;
+  --border: #b8bcc6;
+  --text: #282c34;
+  --text-muted: #6a7080;
+  --text-dim: #8a90a0;
+  --accent: #5c6bc0;
+  --accent-hover: #7986cb;
+  --user-bg: #d8dae2;
+  --assistant-bg: #eaebee;
+  --tool-bg: #e2e4ea;
+  --bg-subtle: rgba(92,107,192,0.06);
+}
+
 /* Theme toggle: circular wipe via View Transitions API.
    Disable the UA cross-fade; the actual clip-path animation is driven by
    Element.animate() in hooks/useTheme.ts after transition.ready resolves. */
@@ -282,7 +356,6 @@ span.linenumber {
     min-width: 0;
     border-right: none !important;
   }
-  /* keep inner content at fixed width so it doesn't reflow during animation */
   .sidebar-container > * {
     width: 260px;
     min-width: 260px;
@@ -290,27 +363,18 @@ span.linenumber {
 }
 
 
-/* Right panel: animate width */
-@media (min-width: 641px) {
-  .right-panel-container {
-    overflow: hidden;
-    transition: width 0.2s ease, min-width 0.2s ease;
-    flex-shrink: 0;
-  }
-  .right-panel-container.right-panel-open {
-    width: 42%;
-    min-width: 300px;
-  }
-  .right-panel-container.right-panel-closed {
-    width: 0;
-    min-width: 0;
-    border-left: none !important;
-  }
-  /* keep inner content at fixed width so it doesn't reflow during animation */
-  .right-panel-container > * {
-    width: 42vw;
-    min-width: 300px;
-  }
+/* Right panel */
+.right-panel-container {
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.right-panel-container > * {
+  width: 100%;
+  min-width: 0;
+}
+.file-content-area pre {
+  max-width: 100% !important;
+  width: 100% !important;
 }
 
 /* Mobile sidebar: slide in/out as overlay */
@@ -352,3 +416,24 @@ span.linenumber {
     display: none !important;
   }
 }
+
+/* File viewer layout classes (avoid inline flex style hydration mismatch) */
+.file-content-wrapper {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.file-content-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+
+/* Minimap — hide scrollbar */
+.minimap-scroll::-webkit-scrollbar { display: none; }
+.minimap-scroll { -ms-overflow-style: none; }
+
+/* unique_test_marker_12345 */
+
+

@@ -6,8 +6,11 @@ import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { diffLines, type Change } from "diff";
 import { useTheme } from "@/hooks/useTheme";
 import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import CodeMirrorEditor from "@/components/CodeMirrorEditor";
+import { useFileWatcher } from "@/hooks/useFileWatcher";
 
 interface Props {
   filePath: string;
@@ -25,16 +28,16 @@ const AUDIO_EXTS = new Set(["mp3", "wav", "ogg", "oga", "opus", "m4a", "aac", "f
 const DOCUMENT_PREVIEW_EXTS = new Set(["pdf", "docx"]);
 const DOCX_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
 
+function hasExt(filePath: string, exts: Set<string>): boolean {
+  return exts.has(getFileName(filePath).toLowerCase().split(".").pop() ?? "");
+}
+
 function isImagePath(filePath: string): boolean {
-  const base = getFileName(filePath);
-  const ext = base.toLowerCase().split(".").pop() ?? "";
-  return IMAGE_EXTS.has(ext);
+  return hasExt(filePath, IMAGE_EXTS);
 }
 
 function isAudioPath(filePath: string): boolean {
-  const base = getFileName(filePath);
-  const ext = base.toLowerCase().split(".").pop() ?? "";
-  return AUDIO_EXTS.has(ext);
+  return hasExt(filePath, AUDIO_EXTS);
 }
 
 function getFileExt(filePath: string): string {
@@ -80,78 +83,30 @@ function formatSize(bytes: number): string {
 }
 
 // Myers diff — returns line-level unified diff
-function diffLines(oldLines: string[], newLines: string[]): DiffLine[] {
-  const m = oldLines.length;
-  const n = newLines.length;
-  const max = m + n;
-  const v: number[] = new Array(2 * max + 1).fill(0);
-  const trace: number[][] = [];
-
-  for (let d = 0; d <= max; d++) {
-    trace.push([...v]);
-    for (let k = -d; k <= d; k += 2) {
-      let x: number;
-      if (k === -d || (k !== d && v[k - 1 + max] < v[k + 1 + max])) {
-        x = v[k + 1 + max];
+function computeDiff(oldContent: string, newContent: string): DiffLine[] {
+  const changes = diffLines(oldContent, newContent);
+  const result: DiffLine[] = [];
+  let oldLine = 1;
+  let newLine = 1;
+  for (const part of changes) {
+    const lines = part.value.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    for (const text of lines) {
+      if (part.added) {
+        result.push({ type: "added", text, lineNo: newLine++ });
+      } else if (part.removed) {
+        result.push({ type: "removed", text, lineNo: oldLine++ });
       } else {
-        x = v[k - 1 + max] + 1;
-      }
-      let y = x - k;
-      while (x < m && y < n && oldLines[x] === newLines[y]) {
-        x++;
-        y++;
-      }
-      v[k + max] = x;
-      if (x >= m && y >= n) {
-        // backtrack
-        const result: DiffLine[] = [];
-        let cx = m, cy = n;
-        for (let dd = d; dd > 0; dd--) {
-          const pv = trace[dd - 1];
-          const pk = cx - cy;
-          let prevK: number;
-          if (pk === -dd || (pk !== dd && pv[pk - 1 + max] < pv[pk + 1 + max])) {
-            prevK = pk + 1;
-          } else {
-            prevK = pk - 1;
-          }
-          const prevX = pv[prevK + max];
-          const prevY = prevX - prevK;
-          while (cx > prevX && cy > prevY) {
-            cx--;
-            cy--;
-            result.unshift({ type: "unchanged", text: oldLines[cx], lineNo: cx + 1 });
-          }
-          if (dd > 0) {
-            if (cx > prevX) {
-              cx--;
-              result.unshift({ type: "removed", text: oldLines[cx], lineNo: cx + 1 });
-            } else {
-              cy--;
-              result.unshift({ type: "added", text: newLines[cy], lineNo: cy + 1 });
-            }
-          }
-        }
-        while (cx > 0 && cy > 0) {
-          cx--;
-          cy--;
-          result.unshift({ type: "unchanged", text: oldLines[cx], lineNo: cx + 1 });
-        }
-        return result;
+        result.push({ type: "unchanged", text, lineNo: oldLine++ });
+        newLine++;
       }
     }
   }
-  // Fallback: treat all as replaced
-  return [
-    ...oldLines.map((t, i) => ({ type: "removed" as const, text: t, lineNo: i + 1 })),
-    ...newLines.map((t, i) => ({ type: "added" as const, text: t, lineNo: i + 1 })),
-  ];
+  return result;
 }
 
 function DiffView({ oldContent, newContent }: { oldContent: string; newContent: string; language: string }) {
-  const oldLines = oldContent.split("\n");
-  const newLines = newContent.split("\n");
-  const diff = diffLines(oldLines, newLines);
+  const diff = computeDiff(oldContent, newContent);
 
   const hasChanges = diff.some((l) => l.type !== "unchanged");
   if (!hasChanges) {
@@ -304,52 +259,10 @@ function DiffView({ oldContent, newContent }: { oldContent: string; newContent: 
 }
 
 function ImageViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
-  const [watching, setWatching] = useState(false);
-  const [bust, setBust] = useState(0);
-  const [size, setSize] = useState<number | null>(null);
+  const { watching, bust, size, error, src } = useFileWatcher(filePath);
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
-
-  useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setNaturalSize(null);
-    setError(null);
-    setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    const encoded = encodeFilePathForApi(filePath);
-    const es = new EventSource(`/api/files/${encoded}?type=watch`);
-    esRef.current = es;
-
-    es.addEventListener("connected", () => setWatching(true));
-    es.addEventListener("change", (e) => {
-      try {
-        const d = JSON.parse((e as MessageEvent).data) as { size?: number };
-        if (typeof d.size === "number") setSize(d.size);
-      } catch { /* ignore */ }
-      setBust((b) => b + 1);
-    });
-    es.addEventListener("error", () => setWatching(false));
-    es.onerror = () => setWatching(false);
-
-    return () => {
-      es.close();
-      esRef.current = null;
-    };
-  }, [filePath]);
-
-  const encoded = encodeFilePathForApi(filePath);
-  const src = `/api/files/${encoded}?type=read${bust ? `&v=${bust}` : ""}`;
-
-  const formatSizeStr = size != null ? formatSize(size) : null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -438,52 +351,10 @@ function formatDuration(seconds: number): string {
 }
 
 function AudioViewer({ filePath, cwd }: { filePath: string; cwd?: string }) {
-  const [watching, setWatching] = useState(false);
-  const [bust, setBust] = useState(0);
-  const [size, setSize] = useState<number | null>(null);
+  const { watching, bust, size, error, src } = useFileWatcher(filePath);
   const [duration, setDuration] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const esRef = useRef<EventSource | null>(null);
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
-
-  useEffect(() => {
-    setBust(0);
-    setSize(null);
-    setDuration(null);
-    setError(null);
-    setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    const encoded = encodeFilePathForApi(filePath);
-    const es = new EventSource(`/api/files/${encoded}?type=watch`);
-    esRef.current = es;
-
-    es.addEventListener("connected", () => setWatching(true));
-    es.addEventListener("change", (e) => {
-      try {
-        const d = JSON.parse((e as MessageEvent).data) as { size?: number };
-        if (typeof d.size === "number") setSize(d.size);
-      } catch { /* ignore */ }
-      setDuration(null);
-      setError(null);
-      setBust((b) => b + 1);
-    });
-    es.addEventListener("error", () => setWatching(false));
-    es.onerror = () => setWatching(false);
-
-    return () => {
-      es.close();
-      esRef.current = null;
-    };
-  }, [filePath]);
-
-  const encoded = encodeFilePathForApi(filePath);
-  const src = `/api/files/${encoded}?type=read${bust ? `&v=${bust}` : ""}`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -697,7 +568,11 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [previewMode, setPreviewMode] = useState(false);
   const [viewMode, setViewMode] = useState<"source" | "diff">("source");
-  const [wrapLines, setWrapLines] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [editContent, setEditContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const [watching, setWatching] = useState(false);
   const [changeCount, setChangeCount] = useState(0);
   const esRef = useRef<EventSource | null>(null);
@@ -736,7 +611,6 @@ function TextFileViewer({ filePath, cwd }: Props) {
     setPrevContent(null);
     setPreviewMode(false);
     setViewMode("source");
-    setWrapLines(false);
     setChangeCount(0);
     setWatching(false);
 
@@ -798,9 +672,10 @@ function TextFileViewer({ filePath, cwd }: Props) {
   const isMarkdown = data.language === "markdown";
   const lines = data.content.split("\n");
   const hasDiff = prevContent !== null && prevContent !== data.content;
+  const encodedApiPath = `/api/files/${encodeFilePathForApi(filePath)}`;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       {/* Status bar */}
       <div
         style={{
@@ -821,6 +696,55 @@ function TextFileViewer({ filePath, cwd }: Props) {
         <span style={{ marginLeft: "auto" }}>{data.language}</span>
         {viewMode === "source" && <span>{lines.length} lines</span>}
         <span>{formatSize(data.size)}</span>
+
+        {/* Edit / Save / Cancel */}
+        {!editMode ? (
+          <button
+            onClick={() => { setEditContent(data.content); setEditMode(true); setSaveError(null); }}
+            style={{
+              padding: "2px 8px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 5,
+              cursor: "pointer", background: "var(--bg-hover)", color: "var(--text-muted)",
+            }}
+          >
+            Edit
+          </button>
+        ) : (
+          <>
+            <button
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true);
+                try {
+                  const res = await fetch(encodedApiPath, { method: "PUT", body: editContent });
+                  if (!res.ok) throw new Error((await res.json()).error);
+                  setEditMode(false);
+                  setSaveError(null);
+                  fetchContent(filePath, true);
+                } catch (e: any) {
+                  setSaveError(e.message);
+                } finally {
+                  setSaving(false);
+                }
+              }}
+              style={{
+                padding: "2px 8px", fontSize: 11, border: "1px solid var(--accent)", borderRadius: 5,
+                cursor: saving ? "wait" : "pointer", background: "var(--accent)", color: "#fff",
+                fontWeight: 600,
+              }}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+            <button
+              onClick={() => { setEditMode(false); setEditContent(data.content); }}
+              style={{
+                padding: "2px 8px", fontSize: 11, border: "1px solid var(--border)", borderRadius: 5,
+                cursor: "pointer", background: "var(--bg-hover)", color: "var(--text-muted)",
+              }}
+            >
+              Cancel
+            </button>
+          </>
+        )}
 
         {/* Live watch indicator */}
         <span
@@ -868,22 +792,6 @@ function TextFileViewer({ filePath, cwd }: Props) {
           </div>
         )}
 
-        {/* Word wrap toggle */}
-        {viewMode === "source" && !previewMode && (
-          <button
-            onClick={() => setWrapLines((v) => !v)}
-            title={wrapLines ? "Disable word wrap" : "Enable word wrap"}
-            style={{
-              padding: "2px 8px", fontSize: 11, cursor: "pointer",
-              background: wrapLines ? "var(--bg-selected)" : "var(--bg-hover)",
-              color: wrapLines ? "var(--text)" : "var(--text-muted)",
-              border: "1px solid var(--border)", borderRadius: 5,
-              fontWeight: wrapLines ? 600 : 400,
-            }}
-          >
-            wrap
-          </button>
-        )}
 
         {/* HTML source/preview toggle */}
         {isHtml && viewMode === "source" && (
@@ -943,7 +851,7 @@ function TextFileViewer({ filePath, cwd }: Props) {
       </div>
 
       {/* Content area */}
-      <div style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
+      <div className="file-content-scroll file-content-area" style={{ minHeight: 0 }}>
         {viewMode === "diff" && hasDiff ? (
           <DiffView oldContent={prevContent!} newContent={data.content} language={data.language} />
         ) : isHtml && previewMode ? (
@@ -959,6 +867,26 @@ function TextFileViewer({ filePath, cwd }: Props) {
             style={{ padding: "24px 32px", maxWidth: 800 }}
           >
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.content}</ReactMarkdown>
+          </div>
+        ) : editMode ? (
+          <div style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            {saveError && (
+              <div style={{
+                padding: "4px 12px", fontSize: 11, color: "#f87171",
+                background: "rgba(248,113,113,0.08)", borderBottom: "1px solid rgba(248,113,113,0.2)",
+                flexShrink: 0,
+              }}>
+                Save failed: {saveError}
+              </div>
+            )}
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <CodeMirrorEditor
+                value={editContent}
+                onChange={setEditContent}
+                language={data.language}
+                isDark={isDark}
+              />
+            </div>
           </div>
         ) : (
           <SyntaxHighlighter
@@ -978,10 +906,13 @@ function TextFileViewer({ filePath, cwd }: Props) {
               fontSize: 13,
               lineHeight: 1.6,
               fontFamily: "var(--font-mono)",
-              minHeight: "100%",
+              width: "100%",
+              maxWidth: "100%",
+              whiteSpace: "pre-wrap",
+              overflow: "visible",
             }}
             codeTagProps={{ style: { fontFamily: "var(--font-mono)" } }}
-            wrapLongLines={wrapLines}
+            wrapLongLines={true}
           >
             {data.content}
           </SyntaxHighlighter>

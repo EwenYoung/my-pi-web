@@ -6,6 +6,10 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
 
+// Module-level Map survives component re-creation (key={sessionKey})
+const globalEvtSrcMap: Map<string, EventSource> = (globalThis as any).__piEvtSrcMap ?? new Map();
+(globalThis as any).__piEvtSrcMap = globalEvtSrcMap;
+
 export interface SessionData {
   sessionId: string;
   filePath: string;
@@ -52,18 +56,21 @@ interface AgentEvent {
 export type AgentPhase =
   | { kind: "waiting_model" }
   | { kind: "running_tools"; tools: { id: string; name: string }[] }
+  | { kind: "thinking" }
   | null;
 
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   onAgentEnd?: () => void;
+  onBackgroundAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
+  onSessionNameChanged?: () => void;
   setNewSessionModel?: (model: { provider: string; modelId: string } | null) => void;
   setToolPreset?: (preset: "none" | "default" | "full") => void;
 }
@@ -84,8 +91,9 @@ export interface AttachedImage {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, onAgentEnd, onBackgroundAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
+    onSessionNameChanged,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
@@ -96,6 +104,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [entryIds, setEntryIds] = useState<string[]>([]);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [totalMessages, setTotalMessages] = useState(0);
+  const isLoadingMoreRef = useRef(false);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
@@ -103,7 +114,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModelState] = useState<{ provider: string; modelId: string } | null>(null);
-  const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("default");
+  const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("full");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
@@ -115,10 +126,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactError, setCompactError] = useState<string | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
 
-  const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const agentRunningRef = useRef(false);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
+  const waitingModelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialScrollDoneRef = useRef(false);
   const lastUserMsgRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToUserRef = useRef(false);
@@ -148,12 +159,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return total > 0 ? { tokens, cost } : null;
   })();
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
+  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, offset?: number, limit?: number, last?: number) => {
     try {
       if (showLoading) setLoading(true);
-      const url = includeState
+      let url = includeState
         ? `/api/sessions/${encodeURIComponent(sid)}?includeState`
         : `/api/sessions/${encodeURIComponent(sid)}`;
+      const hasQuery = url.includes("?");
+      if (offset !== undefined && limit !== undefined) {
+        url += `${hasQuery ? "&" : "?"}offset=${offset}&limit=${limit}`;
+      } else if (last !== undefined) {
+        url += `${hasQuery ? "&" : "?"}last=${last}`;
+      }
       const res = await fetch(url);
       if (res.status === 404) {
         if (showLoading) {
@@ -165,14 +182,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } } };
-      setData(d);
-      setActiveLeafId(d.leafId);
-      setMessages(d.context.messages);
-      setEntryIds(d.context.entryIds ?? []);
-      setCurrentModelOverride(null);
+      const d = await res.json() as SessionData & { agentState?: { running: boolean; state?: { isStreaming?: boolean; isCompacting?: boolean; contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null; systemPrompt?: string; thinkingLevel?: string } }; totalMessages?: number; hasMore?: boolean };
+      if (offset !== undefined && offset > 0) {
+        // Append messages for pagination
+        setMessages(prev => [...d.context.messages, ...prev]);
+        setEntryIds(prev => [...(d.context.entryIds ?? []), ...prev]);
+      } else {
+        setData(d);
+        setActiveLeafId(d.leafId);
+        setMessages(d.context.messages);
+        setEntryIds(d.context.entryIds ?? []);
+        setCurrentModelOverride(null);
+      }
       setError(null);
-      // If no live agent state, fall back to thinking level from session file
+      setHasMoreMessages(d.hasMore ?? false);
+      setTotalMessages(d.totalMessages ?? d.context.messages.length);
+      
       if (!d.agentState?.state?.thinkingLevel && d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
         setThinkingLevel(d.context.thinkingLevel as ThinkingLevelOption);
       }
@@ -184,6 +209,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (showLoading) setLoading(false);
     }
   }, []);
+
+  const loadMoreMessages = useCallback(async () => {
+    if (!sessionIdRef.current || !hasMoreMessages) return;
+    isLoadingMoreRef.current = true;
+    // Use last with larger value instead of offset/limit (same scheme as initial load)
+    await loadSession(sessionIdRef.current, false, false, undefined, undefined, messages.length + 50);
+    setTimeout(() => { isLoadingMoreRef.current = false; }, 100);
+  }, [hasMoreMessages, messages.length, loadSession]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     try {
@@ -213,27 +246,55 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [setToolPresetState]);
 
   const connectEvents = useCallback((sid: string) => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
+    if (globalEvtSrcMap.has(sid)) return;
     const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
-    eventSourceRef.current = es;
+    globalEvtSrcMap.set(sid, es);
     es.onmessage = (e) => {
       try {
         const event = JSON.parse(e.data) as AgentEvent;
+        if (sid !== sessionIdRef.current && event.type === "agent_end") {
+          onBackgroundAgentEnd?.();
+          es.close();
+          globalEvtSrcMap.delete(sid);
+          return;
+        }
         handleAgentEventRef.current?.(event);
       } catch {
         // ignore
       }
     };
+    es.onopen = () => {
+      // SSE 重连成功，同步最新状态
+      const sid = sessionIdRef.current;
+      if (sid && agentRunningRef.current) {
+        fetch(`/api/agent/${encodeURIComponent(sid)}`)
+          .then((r) => r.json())
+          .then((data) => {
+            const agentState = data.state;
+            if (agentState?.isStreaming === false) {
+              // Agent 已完成，加载完整 session
+              loadSession(sid);
+              setAgentRunning(false);
+              setAgentPhase(null);
+              if (waitingModelTimerRef.current) {
+                clearTimeout(waitingModelTimerRef.current);
+                waitingModelTimerRef.current = null;
+              }
+            }
+          })
+          .catch(() => {});
+      }
+    };
     es.onerror = () => {
-      if (eventSourceRef.current === es && agentRunningRef.current) {
+      if (sid === sessionIdRef.current && agentRunningRef.current) {
         es.close();
-        eventSourceRef.current = null;
+        globalEvtSrcMap.delete(sid);
         setTimeout(() => {
-          if (agentRunningRef.current) connectEvents(sid);
+          if (agentRunningRef.current && sessionIdRef.current === sid) connectEvents(sid);
         }, 1000);
+      } else {
+        es.close();
+        globalEvtSrcMap.delete(sid);
       }
     };
   }, []);
@@ -253,6 +314,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentRunning(false);
         setAgentPhase(null);
         setRetryInfo(null);
+        if (waitingModelTimerRef.current) {
+          clearTimeout(waitingModelTimerRef.current);
+          waitingModelTimerRef.current = null;
+        }
+        // Close this session's EventSource
+        if (sessionIdRef.current) {
+          const es = globalEvtSrcMap.get(sessionIdRef.current);
+          if (es) {
+            es.close();
+            globalEvtSrcMap.delete(sessionIdRef.current);
+          }
+        }
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
           loadSession(sessionIdRef.current);
@@ -275,7 +348,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (msg) {
           dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
         }
-        setAgentPhase(null);
+        setAgentPhase({ kind: "thinking" });
         break;
       }
       case "message_end": {
@@ -284,7 +357,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         }
         dispatch({ type: "reset" });
-        setAgentPhase({ kind: "waiting_model" });
+        // Delay showing "waiting_model" to avoid flash if agent_end fires soon
+        if (waitingModelTimerRef.current) clearTimeout(waitingModelTimerRef.current);
+        waitingModelTimerRef.current = setTimeout(() => {
+          if (agentRunningRef.current) {
+            setAgentPhase({ kind: "waiting_model" });
+          }
+        }, 400);
         break;
       }
       case "tool_execution_start": {
@@ -327,6 +406,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (sessionIdRef.current) loadSession(sessionIdRef.current);
         }
         break;
+      case "session_info":
+        // Session name changed (e.g. via /name command) — notify parent to refresh sidebar
+        onSessionNameChanged?.();
+        if (sessionIdRef.current) loadSession(sessionIdRef.current);
+        break;
     }
   }, [loadSession, onAgentEnd]);
   handleAgentEventRef.current = handleAgentEvent;
@@ -356,7 +440,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const selectedModel = newSessionModel;
         if (selectedModel) setPendingModel(selectedModel);
         const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
-        const toolNames = toolPreset === "none" ? PRESET_NONE : toolPreset === "default" ? PRESET_DEFAULT : PRESET_FULL;
+        const toolNames = PRESET_FULL;
         const res = await fetch("/api/agent/new", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -397,6 +481,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to send message:", e);
       setAgentRunning(false);
       setAgentPhase(null);
+      if (waitingModelTimerRef.current) {
+        clearTimeout(waitingModelTimerRef.current);
+        waitingModelTimerRef.current = null;
+      }
       dispatch({ type: "end" });
     }
   }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, onSessionCreated]);
@@ -560,9 +648,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Load session on mount
   useEffect(() => {
-    if (session) {
-      sessionIdRef.current = session.id;
-      loadSession(session.id, true, true).then((agentState) => {
+    if (!session) return;
+    sessionIdRef.current = session.id;
+    loadSession(session.id, true, true, undefined, undefined, 50).then((agentState) => {
         if (agentState?.running) {
           loadTools(session.id);
           if (agentState.state?.isStreaming) {
@@ -578,12 +666,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState.state.thinkingLevel !== undefined) setThinkingLevel((agentState.state.thinkingLevel as ThinkingLevelOption) ?? "auto");
         }
       });
-    }
-    return () => {
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -597,6 +679,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useEffect(() => {
     if (messages.length > 0) {
+      if (isLoadingMoreRef.current) return; // Don't scroll when loading more messages
       if (pendingScrollToUserRef.current) {
         pendingScrollToUserRef.current = false;
         initialScrollDoneRef.current = true;
@@ -637,6 +720,53 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => clearTimeout(t);
   }, [compactError]);
 
+  // === 后台保活：切回时自动恢复 ===
+  useEffect(() => {
+    const sid = data?.sessionId;
+    if (!sid) return;
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+
+      // 切回时检查 SSE 连接状态
+      const es = globalEvtSrcMap.get(sid);
+      if (!sid) return;
+
+      // 如果 SSE 已断开或 Agent 仍在运行，重建连接
+      if (agentRunningRef.current) {
+        // 无论连接状态如何，都重新建立 SSE
+        if (es) {
+          es.close();
+          globalEvtSrcMap.delete(sid);
+        }
+        connectEvents(sid);
+      }
+
+      // 总是同步最新状态
+      fetch(`/api/agent/${encodeURIComponent(sid)}`)
+        .then((r) => r.json())
+        .then((data) => {
+          const agentState = data.state;
+          if (agentState?.isStreaming !== undefined) {
+            setAgentRunning(agentState.isStreaming);
+            if (!agentState.isStreaming) {
+              setAgentPhase(null);
+            }
+          }
+          if (agentState?.isCompacting !== undefined) {
+            setIsCompacting(agentState.isCompacting);
+          }
+        })
+        .catch(() => {});
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [data?.sessionId, connectEvents]);
+
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
@@ -645,8 +775,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isCompacting, compactError, currentModel, displayModel, sessionStats,
     agentPhase,
     isNew,
+    hasMoreMessages, totalMessages, loadMoreMessages,
     // Refs
-    sessionIdRef, eventSourceRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef,
     lastUserMsgRef, pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,

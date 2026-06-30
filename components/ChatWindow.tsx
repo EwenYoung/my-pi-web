@@ -21,17 +21,19 @@ interface Props {
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
+  onSessionNameChanged?: () => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((t) => t.name);
-    if (names.length === 0) return "Running tool...";
+    if (names.length === 0) return "Executing tool...";
     if (names.length === 1) return `Running ${names[0]}...`;
     if (names.length <= 3) return `Running ${names.join(", ")}...`;
     return `Running ${names.slice(0, 2).join(", ")} (+${names.length - 2})...`;
   }
-  if (phase?.kind === "waiting_model") return "Waiting for model...";
+  if (phase?.kind === "waiting_model") return "Processing response...";
+  if (phase?.kind === "thinking") return "Thinking...";
   return "Thinking...";
 }
 
@@ -90,7 +92,24 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onSessionNameChanged }: Props) {
+  const { soundEnabled, onSoundToggle, playDoneSound, soundPreset, onSoundPresetChange } = useAudio();
+  const playDoneSoundRef = useRef(playDoneSound);
+  playDoneSoundRef.current = playDoneSound;
+  const soundEnabledRef = useRef(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
+
+  // Play sound on agent_end via useAgentSession's built-in onAgentEnd callback.
+  // This avoids the race condition from overwriting handleAgentEventRef.
+  const handleAgentEndRef = useRef(onAgentEnd);
+  handleAgentEndRef.current = onAgentEnd;
+  const soundOnAgentEnd = useCallback(() => {
+    if (soundEnabledRef.current) {
+      playDoneSoundRef.current();
+    }
+    handleAgentEndRef.current?.();
+  }, []);
+
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
@@ -98,32 +117,16 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     isCompacting, compactError, displayModel: displayModelValue, sessionStats,
     agentPhase,
     isNew,
+    hasMoreMessages, totalMessages, loadMoreMessages,
     messagesEndRef, scrollContainerRef,
     lastUserMsgRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
-    handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
+    handleToolPresetChange, handleThinkingLevelChange, setMessages,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
+    session, newSessionCwd, onAgentEnd: soundOnAgentEnd, onBackgroundAgentEnd: soundOnAgentEnd, onSessionCreated, onSessionForked,
+    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionNameChanged,
   });
-
-  const { soundEnabled, onSoundToggle, playDoneSound } = useAudio();
-  const playDoneSoundRef = useRef(playDoneSound);
-  playDoneSoundRef.current = playDoneSound;
-  const soundEnabledRef = useRef(soundEnabled);
-  soundEnabledRef.current = soundEnabled;
-
-  // Wrap agent event handler to play sound on agent_end
-  const origHandler = handleAgentEventRef.current;
-  useEffect(() => {
-    handleAgentEventRef.current = (event) => {
-      if (event.type === "agent_end" && soundEnabledRef.current) {
-        playDoneSoundRef.current();
-      }
-      origHandler?.(event);
-    };
-  }, [origHandler, handleAgentEventRef]);
 
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
@@ -159,6 +162,46 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !agentRunning;
 
+
+  // Bash command handler
+  const handleBash = useCallback(async (command: string) => {
+    if (!command) return;
+    const cwd = session?.cwd || newSessionCwd || process.env.HOME || "/tmp";
+    // Add user message
+    const userMsg = { role: "user", content: `!${command}`, timestamp: Date.now() } as AgentMessage;
+    setMessages((prev) => [...prev, userMsg]);
+    // Execute bash
+    try {
+      const res = await fetch("/api/bash", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command, cwd }),
+      });
+      const data = await res.json();
+      const output = [data.stdout, data.stderr].filter(Boolean).join("\n");
+      // Format as markdown code block for proper display
+      const formatted = output ? `\`\`\`\n${output}\n\`\`\`` : "(no output)";
+      const assistantMsg = {
+        role: "assistant",
+        content: [{ type: "text", text: formatted }],
+        model: "bash",
+        provider: "local",
+      } as AgentMessage;
+      setMessages((prev) => [...prev, assistantMsg]);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const assistantMsg = {
+        role: "assistant",
+        content: [{ type: "text", text: `Error: ${errMsg}` }],
+        model: "bash",
+        provider: "local",
+      } as AgentMessage;
+      setMessages((prev) => [...prev, assistantMsg]);
+    }
+    // Scroll to bottom
+    requestAnimationFrame(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }));
+  }, [session?.cwd, newSessionCwd, setMessages, messagesEndRef]);
+
   const availableThinkingLevels = displayModelValue
     ? (modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
@@ -174,6 +217,8 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
+      onBash={handleBash}
+      cwd={session?.cwd || newSessionCwd || undefined}
       isStreaming={agentRunning}
       model={displayModelValue}
       modelNames={modelNames}
@@ -192,6 +237,9 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       retryInfo={retryInfo}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
+      soundPreset={soundPreset}
+      onSoundPresetChange={(p: string) => onSoundPresetChange(p as import('@/hooks/useAudio').SoundPreset)}
+      playDoneSound={playDoneSound}
     />
   );
 
@@ -290,6 +338,22 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       <div className="relative flex flex-1 overflow-hidden">
         <div ref={scrollContainerRef} className="flex-1 overflow-y-auto pt-4 [scrollbar-width:none]">
           <div className="mx-auto max-w-[820px] px-4">
+
+            {/* Load more messages button */}
+            {hasMoreMessages && (
+              <div style={{ textAlign: "center", padding: "8px 0" }}>
+                <button
+                  onClick={() => loadMoreMessages()}
+                  style={{
+                    padding: "4px 16px", fontSize: 12, color: "var(--text-muted)",
+                    background: "var(--bg-hover)", border: "1px solid var(--border)",
+                    borderRadius: 6, cursor: "pointer",
+                  }}
+                >
+                  加载更多 ({totalMessages - messages.length} 条)
+                </button>
+              </div>
+            )}
 
             {(() => {
               const toolResultsMap = new Map<string, import("@/lib/types").ToolResultMessage>();

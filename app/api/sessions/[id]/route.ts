@@ -6,9 +6,18 @@ import {
   resolveSessionPath,
   invalidateSessionPathCache,
   buildSessionContext,
-  listAllSessions,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
+
+// Session parse cache: sessionId -> { data, mtime }
+const sessionCache = new Map<string, { data: any; mtime: number }>();
+const SESSION_CACHE_TTL = 30_000; // 30s
+
+function getSessionSize(entries: number) {
+  if (entries < 500) return { level: "small" as const, limit: 0 };
+  if (entries < 2000) return { level: "medium" as const, limit: 200 };
+  return { level: "large" as const, limit: 100 };
+}
 
 export async function GET(
   req: Request,
@@ -21,22 +30,73 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
+    // Check cache
+    const fileMtime = statSync(filePath).mtimeMs;
+    const cached = sessionCache.get(id);
+    if (cached && cached.mtime === fileMtime && Date.now() - cached.mtime < SESSION_CACHE_TTL) {
+      // Apply pagination to cached data
+      const url = new URL(req.url);
+      const offset = parseInt(url.searchParams.get("offset") ?? "-1", 10);
+      const limit = parseInt(url.searchParams.get("limit") ?? "-1", 10);
+      const last = parseInt(url.searchParams.get("last") ?? "-1", 10);
+      const hasPagination = offset >= 0 && limit > 0;
+      const hasLast = last > 0;
+      if (hasPagination) {
+        const paginated = { ...cached.data };
+        paginated.context = {
+          ...cached.data.context,
+          messages: cached.data.context.messages.slice(offset, offset + limit),
+          entryIds: cached.data.context.entryIds ? cached.data.context.entryIds.slice(offset, offset + limit) : undefined,
+        };
+        paginated.hasMore = offset + limit < cached.data.totalMessages;
+        return NextResponse.json(paginated);
+      }
+      if (hasLast) {
+        const paginated = { ...cached.data };
+        paginated.context = {
+          ...cached.data.context,
+          messages: cached.data.context.messages.slice(-last),
+          entryIds: cached.data.context.entryIds ? cached.data.context.entryIds.slice(-last) : undefined,
+        };
+        paginated.hasMore = last < cached.data.totalMessages;
+        return NextResponse.json(paginated);
+      }
+      return NextResponse.json(cached.data);
+    }
+
     const sm = SessionManager.open(filePath);
-    const entries = sm.getEntries() as never;
-    const tree = sm.getTree();
+    const entries = sm.getEntries() as never[];
+    const entryCount = Array.isArray(entries) ? entries.length : 0;
+    const header = sm.getHeader();
     const leafId = sm.getLeafId();
+    const sizeInfo = getSessionSize(entryCount);
+
+    // Skip getTree/getSessionName for large sessions (stack overflow)
+    let tree: any = null;
+    if (sizeInfo.level === "small") {
+      try { tree = sm.getTree(); } catch { /* fallback */ }
+    }
+
     const context = buildSessionContext(entries, leafId);
 
-    const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
-    const allSessions = await listAllSessions();
-    const parentSessionId = allSessions.find((s) => s.id === id)?.parentSessionId;
+    let parentSessionId: string | undefined;
+    try {
+      const firstLine = readFileSync(filePath, "utf8").split("\n")[0];
+      const h = JSON.parse(firstLine) as { parentSession?: string };
+      if (h.parentSession) {
+        const parentFirstLine = readFileSync(h.parentSession, "utf8").split("\n")[0];
+        const ph = JSON.parse(parentFirstLine) as { id?: string };
+        parentSessionId = ph.id;
+      }
+    } catch { /* parent not found */ }
+    const sessionName = sizeInfo.level === "small" ? sm.getSessionName() : null;
     const info = header ? {
       path: filePath,
       id: header.id,
       cwd: header.cwd ?? "",
-      name: sm.getSessionName(),
+      name: sessionName,
       created: header.timestamp,
       modified,
       messageCount: context.messages.length,
@@ -58,19 +118,60 @@ export async function GET(
         const state = await rpc.send({ type: "get_state" });
         agentState = { running: true, state };
       } else {
-        agentState = { running: false };
+        // Check global store for last known context usage
+        const savedCu = (globalThis as any).__piLastContextUsage?.get(id);
+        if (savedCu) {
+          agentState = { running: false, state: { contextUsage: savedCu } };
+        } else {
+          agentState = { running: false };
+        }
       }
     }
 
-    return NextResponse.json({
+    // Pagination support
+    const offset = parseInt(url.searchParams.get("offset") ?? "-1", 10);
+    const limit = parseInt(url.searchParams.get("limit") ?? "-1", 10);
+    const last = parseInt(url.searchParams.get("last") ?? "-1", 10);
+    const hasPagination = offset >= 0 && limit > 0;
+    const hasLast = last > 0;
+    const totalMessages = context.messages.length;
+    const paginatedContext = hasPagination ? {
+      ...context,
+      messages: context.messages.slice(offset, offset + limit),
+      entryIds: context.entryIds ? context.entryIds.slice(offset, offset + limit) : undefined,
+    } : hasLast ? {
+      ...context,
+      messages: context.messages.slice(-last),
+      entryIds: context.entryIds ? context.entryIds.slice(-last) : undefined,
+    } : context;
+
+    const result = {
+      sessionId: id,
+      filePath,
+      info,
+      tree,
+      leafId,
+      context: paginatedContext,
+      totalMessages,
+      hasMore: hasPagination ? (offset + limit < totalMessages) : hasLast ? (last < totalMessages) : false,
+      ...(agentState !== undefined ? { agentState } : {}),
+    };
+
+    // Update cache with FULL context (not paginated)
+    const fullResult = {
       sessionId: id,
       filePath,
       info,
       tree,
       leafId,
       context,
+      totalMessages,
+      hasMore: false,
       ...(agentState !== undefined ? { agentState } : {}),
-    });
+    };
+    sessionCache.set(id, { data: fullResult, mtime: fileMtime });
+
+    return NextResponse.json(result);
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
