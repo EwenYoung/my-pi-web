@@ -39,4 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-.factorygraphify-out/
+
+# graphify output
+graphify-out/
+AGENTS.md
