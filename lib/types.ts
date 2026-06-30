@@ -201,3 +201,31 @@ export interface RpcSessionState {
   sessionName?: string;
   messageCount: number;
 }
+
+// ============================================================
+// Cross-layer types (moved from components/api to keep layers clean)
+// ============================================================
+
+export interface ContextUsage {
+  percent: number | null;
+  contextWindow: number;
+  tokens: number | null;
+}
+
+export interface ToolEntry {
+  name: string;
+  description: string;
+  active: boolean;
+}
+
+export interface SkillSearchResult {
+  package: string;
+  installs: string;
+  url: string;
+  name?: string;
+  description?: string;
+  file?: string;
+  filePath?: string;
+  source?: string;
+  installCount?: number;
+}

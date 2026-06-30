@@ -1,6 +1,6 @@
-import { SessionManager, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SessionEntry, SessionInfo, SessionContext, SessionTreeNode } from "./types";
-import type { SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
+import { SessionManager, buildSessionContext as piBuildSessionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry, SessionInfo, SessionContext, SessionTreeNode, AssistantMessage } from "./types";
+import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 
 export { getAgentDir };
@@ -76,6 +76,11 @@ export function invalidateSessionPathCache(sessionId: string): void {
   __sessionListCache = null;
 }
 
+/** Clear the session list cache so next fetch picks up new/removed sessions */
+export function invalidateSessionListCache(): void {
+  __sessionListCache = null;
+}
+
 export function getSessionEntries(filePath: string): SessionEntry[] {
   const entries = SessionManager.open(filePath).getEntries();
   return entries as unknown as SessionEntry[];
@@ -123,86 +128,43 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
 
   // Find target leaf
   let targetLeaf: SessionEntry | undefined;
-  if (leafId === null) {
-    return { messages: [], entryIds: [], thinkingLevel: "off", model: null };
-  }
+  if (leafId === null) return { messages: [], entryIds: [], thinkingLevel: "off", model: null };
   if (leafId) targetLeaf = byId.get(leafId);
   if (!targetLeaf) targetLeaf = entries[entries.length - 1];
-  if (!targetLeaf) {
-    return { messages: [], entryIds: [], thinkingLevel: "off", model: null };
-  }
+  if (!targetLeaf) return { messages: [], entryIds: [], thinkingLevel: "off", model: null };
 
-  // Walk path from target leaf to root
+  // Walk path from leaf to root
   const path: SessionEntry[] = [];
   let cur: SessionEntry | undefined = targetLeaf;
-  while (cur) {
-    path.unshift(cur);
-    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
-  }
+  while (cur) { path.unshift(cur); cur = cur.parentId ? byId.get(cur.parentId) : undefined; }
 
-  // Extract thinking level and model from path
-  let thinkingLevel = "off";
-  let model: { provider: string; modelId: string } | null = null;
-  for (const e of path) {
-    if (e.type === "thinking_level_change") {
-      thinkingLevel = (e as any).thinkingLevel ?? thinkingLevel;
-    } else if (e.type === "model_change") {
-      model = { provider: (e as any).provider, modelId: (e as any).modelId };
-    }
-  }
+  // Use pi's message building (handles all entry types: compaction, custom_message, branch_summary)
+  const piCtx = piBuildSessionContext(entries, leafId, byId as unknown as Map<string, PiSessionEntry>);
 
-  // Build messages from ALL path entries (skip compaction stripping).
-  // compactions produce a synthetic summary message, normal messages are kept as-is.
-  const entryIds: string[] = [];
-  const rawMessages: any[] = [];
+  // Build entryIds from ALL path messages (skip compaction stripping)
+  const compIdx = path.findIndex((e) => e.type === "compaction");
+  const pathMsgIds = path.filter((e) => e.type === "message").map((e) => e.id);
 
-  for (const e of path) {
-    if (e.type === "message") {
-      entryIds.push(e.id);
-      rawMessages.push((e as any).message);
-    } else if (e.type === "compaction") {
-      entryIds.push(e.id);
-      rawMessages.push({
-        role: "compactionSummary" as const,
-        summary: (e as any).summary ?? "",
-        tokensBefore: (e as any).tokensBefore,
-        timestamp: (e as any).timestamp,
-      });
-    } else if (e.type === "custom_message") {
-      entryIds.push(e.id);
-      rawMessages.push({
-        role: "user" as const,
-        content: `*${(e as any).display || (e as any).customType || "Custom message"}*\n\n${(e as any).content ?? ""}`,
-        timestamp: (e as any).timestamp,
-      });
-    } else if (e.type === "branch_summary" && (e as any).summary) {
-      entryIds.push(e.id);
-      rawMessages.push({
-        role: "user" as const,
-        content: `*Branch summary: ${(e as any).summary}*`,
-        timestamp: (e as any).timestamp,
-      });
-    }
-  }
-
-  // Convert compactionSummary to user message format
-  const messages = rawMessages.map((msg: any) => {
-    if (msg.role === "compactionSummary") {
-      return {
-        role: "user" as const,
-        content: `*The conversation history before this point was compacted into the following summary:*\n\n${msg.summary ?? ""}`,
-        timestamp: msg.timestamp as number | undefined,
-      };
-    }
+  const fmt = (msg: any) => {
+    const r = msg as Record<string, unknown>;
+    if (r.role === "compactionSummary") return { role: "user" as const, content: `*The conversation history before this point was compacted into the following summary:*\n\n${r.summary ?? ""}`, timestamp: r.timestamp as number | undefined };
     return normalizeToolCalls(msg);
-  });
-
-  return {
-    messages,
-    entryIds,
-    thinkingLevel,
-    model,
   };
+
+  if (compIdx === -1) {
+    // No compaction — pi's messages match our path exactly
+    return { messages: piCtx.messages.map(fmt), entryIds: pathMsgIds, thinkingLevel: piCtx.thinkingLevel, model: piCtx.model };
+  }
+
+  // With compaction: pi drops pre-compaction messages. Prepends them back.
+  const preCompMsgs = path.slice(0, compIdx).filter((e) => e.type === "message").map((e) => normalizeToolCalls((e as any).message));
+  const postCompMsgs = piCtx.messages.map(fmt);
+
+  // Include compaction id in entryIds
+  const compInPath = path.find((e) => e.type === "compaction")!;
+  const entryIds = [...pathMsgIds.slice(0, compIdx), compInPath.id, ...pathMsgIds.slice(compIdx)];
+
+  return { messages: [...preCompMsgs, ...postCompMsgs], entryIds, thinkingLevel: piCtx.thinkingLevel, model: piCtx.model };
 }
 
 export function getLeafId(entries: SessionEntry[]): string | null {

@@ -5,7 +5,8 @@ import { join } from "path";
 const { version } = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8")) as { version: string };
 let piVersion = "unknown";
 try {
-  const piPkgPath = join(__dirname, "node_modules/@earendil-works/pi-coding-agent/package.json");
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "/home/even";
+  const piPkgPath = join(homeDir, ".npm-global/lib/node_modules/@earendil-works/pi-coding-agent/package.json");
   piVersion = (JSON.parse(readFileSync(piPkgPath, "utf8")) as { version: string }).version;
 } catch { /* package not found, use default */ }
 

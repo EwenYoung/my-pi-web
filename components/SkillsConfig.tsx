@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import type { SkillSearchResult } from "@/app/api/skills/search/route";
+import type { SkillSearchResult } from "@/lib/types";
 
 interface Skill {
   name: string;

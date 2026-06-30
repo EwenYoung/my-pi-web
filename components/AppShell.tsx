@@ -10,7 +10,7 @@ import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme, THEMES } from "@/hooks/useTheme";
-import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { SessionInfo, SessionTreeNode, ContextUsage } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 
 export function AppShell() {
@@ -73,8 +73,8 @@ export function AppShell() {
   }, []);
 
   // Context usage — populated by ChatWindow, displayed in top bar
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
-  const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
+  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  const handleContextUsageChange = useCallback((usage: ContextUsage | null) => {
     setContextUsage(usage);
   }, []);
 

@@ -13,12 +13,6 @@ import { getRpcSession } from "@/lib/rpc-manager";
 const sessionCache = new Map<string, { data: any; mtime: number }>();
 const SESSION_CACHE_TTL = 30_000; // 30s
 
-function getSessionSize(entries: number) {
-  if (entries < 500) return { level: "small" as const, limit: 0 };
-  if (entries < 2000) return { level: "medium" as const, limit: 200 };
-  return { level: "large" as const, limit: 100 };
-}
-
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -69,11 +63,11 @@ export async function GET(
     const entryCount = Array.isArray(entries) ? entries.length : 0;
     const header = sm.getHeader();
     const leafId = sm.getLeafId();
-    const sizeInfo = getSessionSize(entryCount);
 
     // Skip getTree/getSessionName for large sessions (stack overflow)
+    const isSmall = entryCount < 500;
     let tree: any = null;
-    if (sizeInfo.level === "small") {
+    if (isSmall) {
       try { tree = sm.getTree(); } catch { /* fallback */ }
     }
 
@@ -91,7 +85,7 @@ export async function GET(
         parentSessionId = ph.id;
       }
     } catch { /* parent not found */ }
-    const sessionName = sizeInfo.level === "small" ? sm.getSessionName() : null;
+    const sessionName = isSmall ? sm.getSessionName() : null;
     const info = header ? {
       path: filePath,
       id: header.id,

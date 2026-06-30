@@ -217,31 +217,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
   const sessionRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retriedRef = useRef(false);
 
   const loadSessions = useCallback(async (showLoading = false) => {
     try {
-      // Check global cache first
-      const globalCache = (globalThis as any).__piSessionSidebarCache as
-        | { sessions: SessionInfo[]; timestamp: number }
-        | undefined;
-      if (globalCache && Date.now() - globalCache.timestamp < 30_000) {
-        setAllSessions(globalCache.sessions);
-        setError(null);
-        if (showLoading) setLoading(false);
-        return;
-      }
-      
       if (showLoading) setLoading(true);
       
       const res = await fetch("/api/sessions");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[] };
-      
-      // Store in global cache
-      (globalThis as any).__piSessionSidebarCache = {
-        sessions: data.sessions,
-        timestamp: Date.now(),
-      };
       
       setAllSessions(data.sessions);
       setError(null);
@@ -249,6 +234,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         setSessionRefreshDone(true);
         if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
         sessionRefreshTimerRef.current = setTimeout(() => setSessionRefreshDone(false), 2000);
+      }
+
+      // 兜底：如果 URL 指定的会话不在列表里，500ms 后重试一次
+      const targetId = initialSessionId;
+      if (targetId && !data.sessions.some((s) => s.id === targetId) && !retriedRef.current) {
+        retriedRef.current = true;
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = setTimeout(() => loadSessions(false), 500);
       }
     } catch (e) {
       setError(String(e));

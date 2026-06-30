@@ -1,10 +1,9 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useReducer } from "react";
-import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { AgentMessage, SessionInfo, SessionTreeNode, ContextUsage, ToolEntry } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
-import type { ToolEntry } from "@/components/ToolPanel";
 
 // Module-level Map survives component re-creation (key={sessionKey})
 const globalEvtSrcMap: Map<string, EventSource> = (globalThis as any).__piEvtSrcMap ?? new Map();
@@ -117,7 +116,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [toolPreset, setToolPreset] = useState<"none" | "default" | "full">("full");
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
+  const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
