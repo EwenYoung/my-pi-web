@@ -19,7 +19,7 @@
 | 消息缩略图 (ChatMinimap) | ✅ 悬停弹出历史列表 | 圆点式时间线 |
 | Caveman / RTK 开关 | ✅ 动态检测 | ❌ |
 | 会话渐进式加载 | ✅ <500/500-2000/>2000 分级 | 全部加载 |
-| 会话全局缓存 | ✅ 30s TTL 客户端缓存 | ❌ |
+| 会话全局缓存 | ✅ 服务端 60s TTL | ❌ |
 | 上下文压缩前消息可加载 | ✅ 全量历史可见 | 压缩后丢弃 |
 | 后台会话完成提示音 | ✅ 多 SSE 连接 | ❌ |
 | 主题精简英文化 | ✅ 6 个主题 | 9 个主题 |
@@ -32,18 +32,7 @@
 确保本地已安装 pi 编程智能体（`npx pi`），然后：
 
 ```bash
-# 方式一：直接运行（无需安装）
-npx my-pi-web
-```
-
-```bash
-# 方式二：全局安装后使用
-npm install -g my-pi-web
-pi-web
-```
-
-```bash
-# 方式三：克隆项目本地运行
+# 克隆项目本地运行
 git clone https://github.com/EwenYoung/my-pi-web.git
 cd my-pi-web
 npm install

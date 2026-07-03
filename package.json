@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "dev": "next dev -p 9527",
-    "build": "next build --webpack",
+    "build": "next build",
     "start": "next start -p 9527",
     "lint": "eslint .",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
