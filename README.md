@@ -6,7 +6,7 @@
 
 > 本项目是 `@agegr/pi-web` 的定制分支，在原版基础上进行了功能增强和 UI 优化。
 
-![截图](/screenshot.jpg)
+![截图](public/screenshot.jpg)
 
 ## 与原版的差异
 
