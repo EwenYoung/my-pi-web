@@ -4,9 +4,8 @@ import type { AgentSessionLike, ToolInfo } from "./pi-types";
 import type { ContextUsage } from "./types";
 
 // Keep last context usage per session id, accessible even after RPC session ends
-globalThis.__piLastContextUsage = globalThis.__piLastContextUsage as
-  Map<string, ContextUsage>
-  ?? new Map();
+(globalThis as any).__piLastContextUsage = (globalThis as any).__piLastContextUsage
+  ?? new Map<string, ContextUsage>();
 
 // ============================================================================
 // Types

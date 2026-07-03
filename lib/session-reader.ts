@@ -139,7 +139,7 @@ export function buildSessionContext(entries: SessionEntry[], leafId?: string | n
   while (cur) { path.unshift(cur); cur = cur.parentId ? byId.get(cur.parentId) : undefined; }
 
   // Use pi's message building (handles all entry types: compaction, custom_message, branch_summary)
-  const piCtx = piBuildSessionContext(entries, leafId, byId as unknown as Map<string, PiSessionEntry>);
+  const piCtx = piBuildSessionContext(entries as unknown as PiSessionEntry[], leafId, byId as unknown as Map<string, PiSessionEntry>);
 
   // Build entryIds from ALL path messages (skip compaction stripping)
   const compIdx = path.findIndex((e) => e.type === "compaction");
