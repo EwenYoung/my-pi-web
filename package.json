@@ -1,7 +1,7 @@
 {
   "name": "my-pi-web",
   "version": "1.0.0",
-  "description": "Pi Agent Web UI - 语音输入、文件编辑、会话缓存增强的 pi 网页界面"
+  "description": "Pi Agent Web UI - 语音输入、文件编辑、会话缓存增强的 pi 网页界面",
   "license": "MIT",
   "bin": {
     "pi-web": "bin/pi-web.js"
